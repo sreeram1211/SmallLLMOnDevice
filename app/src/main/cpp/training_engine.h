@@ -1,18 +1,13 @@
 /**
- * PocketSloth training engine — header for the STUB LoRA loop.
+ * PocketSloth training engine — session + hyperparams shared by STUB and HybridEngine.
  *
- * ============================================================================
- * REAL llama.cpp LoRA INTEGRATION (replace STUB bodies in native-lib.cpp):
- * ============================================================================
- * 1. Vendor llama.cpp under app/src/main/cpp/third_party/llama.cpp
- * 2. Expose ggml / llama train APIs (gguf load, LoRA adapters, optimizer step).
- * 3. Map LoraParams JSON -> llama_lora / train hyperparams (rank, alpha, lr, …).
- * 4. Drive tokens from train_data_path (jsonl) through llama_batch / train loop.
- * 5. After each optimizer step, call emit_progress(...) with real loss / t/s / RSS.
- * 6. Persist adapter weights (GGUF LoRA export) on COMPLETED.
- *
- * This STUB intentionally simulates timing and metrics so the UI/JNI path can
- * be developed without a full NDK llama.cpp build.
+ * Real llama.cpp LoRA path (see hybrid_engine.cpp):
+ *  1. Vendor under app/src/main/cpp/third_party/llama.cpp (git submodule).
+ *  2. CMake defines LLAMA_AVAILABLE and links llama/ggml into pocketsloth_native.
+ *  3. HybridEngine loads GGUF, reports memory, runs forward-pass throughput metrics.
+ *  4. TODO: wire llama_opt_init / llama_opt_epoch (examples/training/finetune.cpp)
+ *     and tools/export-lora for adapter GGUF export.
+ *  5. Keep emit_progress / onNativeProgress JNI contract stable for Compose UI.
  */
 #pragma once
 
@@ -49,11 +44,17 @@ struct TrainingSession {
     std::atomic<bool> cancel_requested{false};
     std::atomic<bool> running{false};
     void* bridge_global = nullptr; // jobject GlobalRef to TrainingBridge
+
+    // Hybrid / llama state (opaque pointers; owned by HybridEngine).
+    bool llama_ready = false;
+    bool used_stub_fallback = false;
+    void* llama_model = nullptr;   // struct llama_model*
+    void* llama_ctx = nullptr;     // struct llama_context*
+    float model_size_mb = 0.f;
 };
 
-/** Parse minimal JSON fields we care about (no full JSON lib in STUB). */
+/** Parse minimal JSON fields we care about (no full JSON lib required). */
 LoraHyperParams parse_lora_params_json(const char* json);
 
-/** Approximate process RSS in MiB (Linux /proc; falls back on Android). */
+/** Approximate process RSS in MiB (Linux /proc; works on Android). */
 float sample_memory_mb();
-

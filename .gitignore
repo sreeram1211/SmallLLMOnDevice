@@ -75,3 +75,8 @@ fastlane/test_output
 # Misc
 *.hprof
 .vscode/
+
+# Local GGUF / large model artifacts (do not commit)
+*.gguf
+*.bin
+!gradle/wrapper/gradle-wrapper.jar

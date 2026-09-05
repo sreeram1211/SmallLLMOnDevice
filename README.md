@@ -21,16 +21,16 @@ On-device LoRA fine-tuning playground for Android (`com.pocketsloth.app`).
 │  NativeLoRAEngine  →  TrainingBridge  →  TrainingMetrics    │
 │  LoraParams (JSON)                                          │
 └───────────────────────────┬─────────────────────────────────┘
-                            │ JNI
+                            │ JNI (stable API)
 ┌───────────────────────────▼─────────────────────────────────┐
-│  libpocketsloth_native.so  (CMake, arm64-v8a)               │
-│  native-lib.cpp  — STUB training loop (~100ms callbacks)    │
-│  training_engine.h — session + hyperparams                  │
+│  libpocketsloth_native.so  (CMake, arm64-v8a + NEON)        │
+│  HybridEngine — llama.cpp when vendored + GGUF loads        │
+│  STUB fallback if submodule missing or model load fails     │
 └─────────────────────────────────────────────────────────────┘
 ```
 
 - **minSdk 29 / target & compile 34**, ABI filtered to **arm64-v8a**.
-- **NDK + CMake** `externalNativeBuild` builds `pocketsloth_native`.
+- **NDK + CMake** `externalNativeBuild` builds `pocketsloth_native` and (when present) static `llama` / `ggml`.
 - Progress fields: `step`, `loss`, `lr`, `memory_mb`, `tokens_per_sec` via `TrainingBridge.onNativeProgress`.
 
 ## Project layout
@@ -39,13 +39,15 @@ On-device LoRA fine-tuning playground for Android (`com.pocketsloth.app`).
 |------|------|
 | `app/.../MainActivity.kt` | Theme + hosts `PocketSlothNavHost` |
 | `app/.../presentation/navigation/*` | Routes, bottom bar, NavHost wiring |
-| `app/.../presentation/screens/*` | Full Compose screens (Dataset, Config, Dashboard+Canvas loss, Chat A/B) |
-| `app/.../presentation/viewmodel/*` | Screen VMs (in-memory / sim gateways until DI) |
+| `app/.../presentation/screens/*` | Full Compose screens |
+| `app/.../presentation/viewmodel/*` | Screen VMs |
 | `app/.../domain/*` | Models + repository contracts |
-| `app/.../data/*` | Room, DataStore, importers, formatters, mappers |
+| `app/.../data/*` | Room, DataStore, importers, formatters |
 | `app/.../service/*` | `FineTuningService`, `ThermalMonitor` |
 | `app/.../native/*` | JNI façade + metrics |
-| `app/.../cpp/*` | STUB engine + CMake |
+| `app/.../cpp/native-lib.cpp` | JNI entrypoints (stable) |
+| `app/.../cpp/hybrid_engine.*` | Hybrid llama / STUB training path |
+| `app/.../cpp/third_party/llama.cpp` | **git submodule** → ggml-org/llama.cpp |
 
 ## Screens
 
@@ -55,35 +57,85 @@ On-device LoRA fine-tuning playground for Android (`com.pocketsloth.app`).
 - **Training dashboard** — live metrics + Canvas loss curve, pause/stop
 - **Chat playground** — Base vs fine-tuned adapter A/B toggle
 
+## Clone & submodule init
+
+llama.cpp is **not** vendored as a full tree in git (size). It is a submodule:
+
+```bash
+git clone https://github.com/sreeram1211/SmallLLMOnDevice.git
+cd SmallLLMOnDevice
+git submodule update --init --recursive
+# equivalent path:
+#   git submodule update --init --recursive app/src/main/cpp/third_party/llama.cpp
+```
+
+`.gitmodules` points at `https://github.com/ggml-org/llama.cpp.git` under
+`app/src/main/cpp/third_party/llama.cpp`.
+
+If the submodule is missing, CMake still builds a **STUB-only** `pocketsloth_native`
+so the app compiles and the UI keeps working.
+
 ## Build
 
-Open the `PocketSloth` folder in Android Studio (Hedgehog+ / AGP 8.5), sync Gradle, and run on an **arm64** device/emulator with NDK **26.1+** installed.
+Open the project in Android Studio (Hedgehog+ / AGP 8.5), sync Gradle, and run on an
+**arm64** device/emulator with NDK **26.1+** installed.
 
 ```bash
 ./gradlew :app:assembleDebug
 ```
 
-Gradle wrapper (`gradlew`, `gradle-wrapper.jar`, properties for **Gradle 8.7**) is checked in. Root `build.gradle.kts` applies KSP `apply false` matching the app module.
+Gradle wrapper (`gradlew`, `gradle-wrapper.jar`, properties for **Gradle 8.7**) is checked in.
 
-## How to plug in real llama.cpp
+### Native / CMake notes (arm64-v8a + NEON)
 
-The C++ loop is clearly marked **STUB**. To swap in real LoRA training:
+Defaults in `app/src/main/cpp/CMakeLists.txt`:
 
-1. **Vendor sources** under `app/src/main/cpp/third_party/llama.cpp` (git submodule recommended).
-2. **CMake** — extend `CMakeLists.txt` to add_subdirectory and link `llama` + `ggml` into `pocketsloth_native`.
-3. **JNI contract** — keep emitting the same `onNativeProgress` signature so Compose UI stays unchanged.
-4. **Session API** — map `LoraParams` JSON onto llama LoRA / train structs.
-5. **Flip stub flag** — make `nativeIsStubMode()` return `false` once the real path is default.
-6. **Export** — write LoRA adapter GGUF on `COMPLETED` for the chat playground to load.
+| Flag | Default | Purpose |
+|------|---------|---------|
+| `POCKETSLOTH_USE_LLAMA` | ON | `add_subdirectory` llama.cpp when present |
+| `GGML_NATIVE` | OFF | Avoid host-CPU tuning when cross-compiling |
+| `GGML_OPENMP` / `POCKETSLOTH_GGML_OPENMP` | OFF | Smaller / simpler NDK link |
+| `POCKETSLOTH_GGML_VULKAN` | OFF | Optional GPU; enable via Gradle cmake args |
+| `POCKETSLOTH_GGML_OPENCL` | OFF | Optional / experimental Adreno path |
+| `LLAMA_BUILD_*` tests/tools/examples | OFF | Keep APK native size down |
+| `BUILD_SHARED_LIBS` | OFF | Static `llama`/`ggml` into `pocketsloth_native` |
 
-See comments in `app/src/main/cpp/CMakeLists.txt` and `training_engine.h`.
+Gradle already passes `-DANDROID_ARM_NEON=TRUE` and `abiFilters += "arm64-v8a"`.
+
+To experiment with Vulkan later:
+
+```kotlin
+// app/build.gradle.kts → defaultConfig.externalNativeBuild.cmake.arguments
+"-DPOCKETSLOTH_GGML_VULKAN=ON"
+```
+
+(and add Vulkan `uses-feature` in the manifest if you hard-require GPU).
+
+### HybridEngine behavior
+
+1. **llama linked + GGUF loads** → `nativeIsStubMode() == false`; session runs a real
+   forward-pass throughput probe (`llama_decode`) and reports RSS / model size.
+2. **llama linked but GGUF missing/unloadable** → falls back to the STUB progress loop
+   (no crash); `nativeIsStubMode()` stays `true` until a successful load.
+3. **submodule absent** → STUB-only build; `nativeIsStubMode() == true`.
+
+JNI API remains: `initTrainingSession`, `startEpoch`, `cancelTraining`,
+`onNativeProgress` callbacks.
+
+### LoRA finetune roadmap (TODOs in `hybrid_engine.cpp`)
+
+Full on-device LoRA train is still heavy. Hooks point at upstream:
+
+- `third_party/llama.cpp/examples/training/finetune.cpp` — `llama_opt_init` / `llama_opt_epoch`
+- `third_party/llama.cpp/tools/export-lora` — adapter GGUF export for chat A/B
+- Inference apply: `llama_adapter_lora_init` + `llama_set_adapters_lora`
 
 ## Status / known gaps
 
-- Native training is a **simulation** until llama.cpp is linked.
-- ViewModels currently use in-memory / local simulation gateways; wire to Room + `FineTuningService` via DI for production runs.
-- Chat inference streams are stubbed pending real GGUF load / generate path.
+- Hybrid path = **real GGUF load + forward metrics**; optimizer / LoRA weight updates are scaffolded with TODOs (upstream train APIs are WIP and memory-heavy on phone).
+- ViewModels may still use in-memory gateways until DI is fully wired.
+- Chat generation beyond the native probe is still product-level work.
 
 ## License / status
 
-Prototype scaffold. Native training is a **simulation** until llama.cpp is linked.
+Prototype scaffold. Native library links **llama.cpp** (MIT) when the submodule is initialized.

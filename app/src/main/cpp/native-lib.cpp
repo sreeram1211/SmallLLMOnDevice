@@ -1,26 +1,26 @@
 /**
  * ============================================================================
- * STUB TRAINING LOOP — PocketSloth native JNI
+ * PocketSloth native JNI — HybridEngine (llama.cpp) with STUB fallback
  * ============================================================================
- * This file intentionally SIMULATES LoRA fine-tuning progress for UI wiring.
- * Replace the loop body with real llama.cpp LoRA train steps when ready.
- * See training_engine.h and CMakeLists.txt for integration guidelines.
+ * JNI API (stable):
+ *   nativeIsStubMode / nativeInitTrainingSession / nativeStartEpoch /
+ *   nativeCancelTraining / nativeDestroySession
+ * Progress: TrainingBridge.onNativeProgress(...)
  * ============================================================================
  */
 
+#include "hybrid_engine.h"
 #include "training_engine.h"
 
 #include <android/log.h>
 #include <jni.h>
 
 #include <chrono>
-#include <cmath>
 #include <cstring>
 #include <fstream>
 #include <sstream>
 #include <string>
 #include <thread>
-#include <unistd.h>
 
 #define LOG_TAG "PocketSlothNative"
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, LOG_TAG, __VA_ARGS__)
@@ -32,21 +32,21 @@ namespace {
 JavaVM* g_vm = nullptr;
 jclass g_bridge_class = nullptr;
 jmethodID g_on_progress = nullptr;
+// True only after a session successfully loaded a GGUF with linked llama.
+bool g_real_model_loaded = false;
 
 float sample_memory_mb_impl() {
-    // Prefer VmRSS from /proc/self/status (works on Android).
     std::ifstream in("/proc/self/status");
     std::string line;
     while (std::getline(in, line)) {
         if (line.rfind("VmRSS:", 0) == 0) {
-            // VmRSS:   12345 kB
             std::istringstream iss(line.substr(6));
             long kb = 0;
             iss >> kb;
             return static_cast<float>(kb) / 1024.f;
         }
     }
-    return 128.f; // fallback for STUB
+    return 128.f;
 }
 
 void emit_progress(
@@ -98,80 +98,31 @@ JNIEnv* attach_env(bool* attached) {
     return env;
 }
 
-/**
- * STUB: synthetic loss curve + paced callbacks (~100ms) for max_steps.
- *
- * REAL llama.cpp LoRA (outline):
- *   - llama_load_model_from_file(model_path)
- *   - load / allocate LoRA tensors (rank, alpha) for target modules
- *   - for each batch from train_data_path: forward, loss, backward, adamw step
- *   - export adapter GGUF periodically / on complete
- */
-void stub_training_loop(TrainingSession* session) {
+void training_worker(TrainingSession* session) {
     bool attached = false;
     JNIEnv* env = attach_env(&attached);
     if (!env || !session->bridge_global) {
-        LOGE("STUB loop: failed to attach JNI");
+        LOGE("training worker: failed to attach JNI");
         session->running = false;
         return;
     }
 
     jobject bridge = static_cast<jobject>(session->bridge_global);
-    const int total = session->params.max_steps > 0 ? session->params.max_steps : 100;
-    const float base_lr = session->params.learning_rate;
+    ProgressFn emit = [env, bridge](
+        int step, int total, int epoch,
+        float loss, float lr, float mem, float tps,
+        TrainStatus status, const char* message
+    ) {
+        emit_progress(env, bridge, step, total, epoch, loss, lr, mem, tps, status, message);
+    };
 
-    emit_progress(env, bridge, 0, total, 0, 0.f, 0.f,
-                  sample_memory_mb_impl(), 0.f,
-                  TrainStatus::INITIALIZING, "STUB: initializing session");
-
-    std::this_thread::sleep_for(std::chrono::milliseconds(150));
-
-    if (session->cancel_requested.load()) {
-        emit_progress(env, bridge, 0, total, 0, 0.f, 0.f,
-                      sample_memory_mb_impl(), 0.f,
-                      TrainStatus::CANCELLED, "STUB: cancelled before start");
-        session->running = false;
-        if (attached) g_vm->DetachCurrentThread();
-        return;
-    }
-
-    LOGI("STUB training start steps=%d lr=%f rank=%d", total, base_lr, session->params.rank);
-
-    for (int step = 1; step <= total; ++step) {
-        if (session->cancel_requested.load()) {
-            emit_progress(env, bridge, step - 1, total, 0,
-                          0.f, base_lr, sample_memory_mb_impl(), 0.f,
-                          TrainStatus::CANCELLED, "STUB: cancelled");
-            break;
-        }
-
-        // Synthetic decaying loss + cosine-ish LR schedule with warmup.
-        const float t = static_cast<float>(step) / static_cast<float>(total);
-        float lr = base_lr;
-        if (session->params.warmup_steps > 0 && step <= session->params.warmup_steps) {
-            lr = base_lr * (static_cast<float>(step) / session->params.warmup_steps);
-        } else {
-            lr = base_lr * 0.5f * (1.f + std::cos(3.14159265f * t));
-        }
-        const float loss = 2.5f * std::exp(-2.2f * t) + 0.08f + 0.02f * std::sin(step * 0.37f);
-        const float tps = 80.f + 40.f * t + 5.f * std::sin(step * 0.2f);
-        const float mem = sample_memory_mb_impl() + 32.f * t;
-
-        emit_progress(env, bridge, step, total, 0, loss, lr, mem, tps,
-                      TrainStatus::RUNNING, "STUB: training step");
-
-        // ~100ms cadence so UI can animate without racing.
-        std::this_thread::sleep_for(std::chrono::milliseconds(100));
-
-        if (step == total) {
-            emit_progress(env, bridge, step, total, 0, loss, lr, mem, tps,
-                          TrainStatus::COMPLETED, "STUB: epoch complete");
-        }
-    }
+    HybridEngine::runEpoch(session, emit);
 
     session->running = false;
     if (attached) g_vm->DetachCurrentThread();
-    LOGI("STUB training finished");
+    LOGI("training worker finished (llama_ready=%d stub_fallback=%d)",
+         session->llama_ready ? 1 : 0,
+         session->used_stub_fallback ? 1 : 0);
 }
 
 int extract_int(const char* json, const char* key, int def) {
@@ -249,7 +200,7 @@ JNI_OnLoad(JavaVM* vm, void*) {
         LOGE("GetMethodID onNativeProgress failed");
         return JNI_ERR;
     }
-    LOGI("JNI_OnLoad OK (STUB training engine)");
+    LOGI("JNI_OnLoad OK (llama_compiled=%d)", HybridEngine::llamaCompiledIn() ? 1 : 0);
     return JNI_VERSION_1_6;
 }
 
@@ -270,7 +221,10 @@ extern "C" JNIEXPORT jboolean JNICALL
 Java_com_pocketsloth_app_native_NativeLoRAEngine_nativeIsStubMode(
     JNIEnv*, jobject
 ) {
-    return JNI_TRUE; // flip to FALSE when real llama.cpp path is wired
+    // false only when real lib linked AND a model has successfully loaded.
+    // Otherwise stub (compiled without llama, or GGUF load failed → stub loop).
+    if (!HybridEngine::llamaCompiledIn()) return JNI_TRUE;
+    return g_real_model_loaded ? JNI_FALSE : JNI_TRUE;
 }
 
 extern "C" JNIEXPORT jlong JNICALL
@@ -301,10 +255,23 @@ Java_com_pocketsloth_app_native_NativeLoRAEngine_nativeInitTrainingSession(
     if (data) env->ReleaseStringUTFChars(jTrainDataPath, data);
     if (json) env->ReleaseStringUTFChars(jLoraParamsJSON, json);
 
-    LOGI("STUB session created model=%s data=%s steps=%d",
+    if (HybridEngine::llamaCompiledIn()) {
+        if (HybridEngine::tryInitLlama(session)) {
+            g_real_model_loaded = true;
+        } else {
+            LOGW("llama init failed — session will use STUB fallback");
+            session->used_stub_fallback = true;
+            // Keep g_real_model_loaded if a prior session succeeded; else stays false.
+        }
+    } else {
+        session->used_stub_fallback = true;
+    }
+
+    LOGI("session created model=%s data=%s steps=%d llama_ready=%d",
          session->model_path.c_str(),
          session->train_data_path.c_str(),
-         session->params.max_steps);
+         session->params.max_steps,
+         session->llama_ready ? 1 : 0);
 
     return reinterpret_cast<jlong>(session);
 }
@@ -322,7 +289,7 @@ Java_com_pocketsloth_app_native_NativeLoRAEngine_nativeStartEpoch(
         return JNI_FALSE;
     }
     session->cancel_requested = false;
-    std::thread(stub_training_loop, session).detach();
+    std::thread(training_worker, session).detach();
     return JNI_TRUE;
 }
 
@@ -335,7 +302,7 @@ Java_com_pocketsloth_app_native_NativeLoRAEngine_nativeCancelTraining(
     auto* session = reinterpret_cast<TrainingSession*>(handle);
     if (!session) return;
     session->cancel_requested = true;
-    LOGI("STUB cancel requested");
+    LOGI("cancel requested");
 }
 
 extern "C" JNIEXPORT void JNICALL
@@ -347,14 +314,14 @@ Java_com_pocketsloth_app_native_NativeLoRAEngine_nativeDestroySession(
     auto* session = reinterpret_cast<TrainingSession*>(handle);
     if (!session) return;
     session->cancel_requested = true;
-    // Best-effort wait for stub thread to notice cancel.
     for (int i = 0; i < 50 && session->running.load(); ++i) {
         std::this_thread::sleep_for(std::chrono::milliseconds(20));
     }
+    HybridEngine::shutdownLlama(session);
     if (session->bridge_global) {
         env->DeleteGlobalRef(static_cast<jobject>(session->bridge_global));
         session->bridge_global = nullptr;
     }
     delete session;
-    LOGI("STUB session destroyed");
+    LOGI("session destroyed");
 }
