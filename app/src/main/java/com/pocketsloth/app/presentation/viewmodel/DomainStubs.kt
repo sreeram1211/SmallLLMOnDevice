@@ -1,17 +1,8 @@
 package com.pocketsloth.app.presentation.viewmodel
 
 /**
- * Presentation-layer stubs / contracts that mirror expected domain & native APIs.
- *
- * When real implementations land, inject:
- * - [com.pocketsloth.app.domain.model.InstructionExample]
- * - [com.pocketsloth.app.domain.repository.DatasetRepository]
- * - [com.pocketsloth.app.domain.model.TrainingHyperparams]
- * - [com.pocketsloth.app.domain.model.TrainingMetrics]
- * - [com.pocketsloth.app.native.NativeLoRAEngine]
- * - [com.pocketsloth.app.service.FineTuningService]
- *
- * TODO: replace these stubs with DI-provided domain/data/native types.
+ * Presentation-layer UI models shared by screens / ViewModels.
+ * Domain/data types live under com.pocketsloth.app.domain.* and com.pocketsloth.app.data.*.
  */
 
 /** UI draft/list model mirroring com.pocketsloth.app.domain.model.InstructionExample */
@@ -22,7 +13,7 @@ data class UiInstructionExample(
     val output: String,
 )
 
-/** UI form model mirroring com.pocketsloth.app.domain.model.TrainingHyperparams (+ model path) */
+/** UI form model mirroring TrainingHyperparams (+ model path / dataset) */
 data class UiTrainingConfig(
     val modelPath: String = "",
     val loraRank: Int = 8,
@@ -42,7 +33,7 @@ enum class ThermalState {
     Critical,
 }
 
-/** Dashboard UI metrics; map from domain TrainingMetrics + ThermalMonitor / FineTuningService */
+/** Dashboard UI metrics mapped from domain TrainingMetrics + ThermalMonitor / FineTuningService */
 data class UiTrainingMetrics(
     val step: Int = 0,
     val epoch: Int = 0,
@@ -78,32 +69,8 @@ enum class ChatRole {
 }
 
 /**
- * Contract for com.pocketsloth.app.domain.DatasetRepository / data layer.
- * TODO: inject real repository from com.pocketsloth.app.data.*
- */
-interface DatasetRepositoryGateway {
-    suspend fun listExamples(): List<UiInstructionExample>
-    suspend fun upsert(example: UiInstructionExample)
-    suspend fun delete(id: String)
-    suspend fun importFromUri(uri: String): Int
-}
-
-/**
- * Contract bridging to com.pocketsloth.app.service.FineTuningService
- * and com.pocketsloth.app.native.NativeLoRAEngine.
- * TODO: inject FineTuningService / NativeLoRAEngine
- */
-interface FineTuningGateway {
-    suspend fun start(config: UiTrainingConfig)
-    suspend fun pause()
-    suspend fun resume()
-    suspend fun stop()
-    fun metricsFlow(): kotlinx.coroutines.flow.Flow<UiTrainingMetrics>
-}
-
-/**
- * Contract for chat inference via NativeLoRAEngine (base vs adapter).
- * TODO: inject com.pocketsloth.app.native.NativeLoRAEngine
+ * Thin inference contract for chat. Real llama.cpp generation is still stubbed;
+ * adapter path comes from the last [com.pocketsloth.app.domain.model.TrainingRun].
  */
 interface ChatInferenceGateway {
     fun streamCompletion(
@@ -113,42 +80,4 @@ interface ChatInferenceGateway {
 
     suspend fun exportAdapter(): String?
     suspend fun shareAdapterPath(): String?
-}
-
-/** In-memory DatasetRepository until data layer is wired. */
-class InMemoryDatasetRepository : DatasetRepositoryGateway {
-    private val items = linkedMapOf<String, UiInstructionExample>()
-
-    init {
-        // Seed samples for UI development
-        listOf(
-            UiInstructionExample(
-                id = "sample-1",
-                instruction = "Summarize the following text in one sentence.",
-                input = "PocketSloth trains LoRA adapters on-device.",
-                output = "PocketSloth fine-tunes models locally with LoRA.",
-            ),
-            UiInstructionExample(
-                id = "sample-2",
-                instruction = "Rewrite politely.",
-                input = "Send me the file now.",
-                output = "Could you please send me the file when you have a moment?",
-            ),
-        ).forEach { items[it.id] = it }
-    }
-
-    override suspend fun listExamples(): List<UiInstructionExample> = items.values.toList()
-
-    override suspend fun upsert(example: UiInstructionExample) {
-        items[example.id] = example
-    }
-
-    override suspend fun delete(id: String) {
-        items.remove(id)
-    }
-
-    override suspend fun importFromUri(uri: String): Int {
-        // TODO: parse JSONL/Alpaca via com.pocketsloth.app.data.*
-        return 0
-    }
 }

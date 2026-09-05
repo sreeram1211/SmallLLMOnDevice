@@ -43,8 +43,12 @@ import kotlin.math.roundToInt
 
 @Composable
 fun TrainingConfigScreen(modifier: Modifier = Modifier) {
+    val container = com.pocketsloth.app.di.LocalAppContainer.current
+    val factory = androidx.compose.runtime.remember(container) {
+        com.pocketsloth.app.di.AppViewModelFactory(container)
+    }
     TrainingConfigScreen(
-        viewModel = androidx.lifecycle.viewmodel.compose.viewModel(),
+        viewModel = androidx.lifecycle.viewmodel.compose.viewModel(factory = factory),
         onTrainingStarted = {},
         modifier = modifier,
     )

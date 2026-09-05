@@ -14,6 +14,7 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.lifecycle.viewmodel.compose.viewModel
@@ -24,6 +25,8 @@ import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
+import com.pocketsloth.app.di.AppViewModelFactory
+import com.pocketsloth.app.di.LocalAppContainer
 import com.pocketsloth.app.presentation.screens.ChatPlaygroundScreen
 import com.pocketsloth.app.presentation.screens.DatasetScreen
 import com.pocketsloth.app.presentation.screens.TrainingConfigScreen
@@ -53,6 +56,8 @@ fun PocketSlothNavHost(
     navController: NavHostController = rememberNavController(),
     startDestination: String = Routes.HOME,
 ) {
+    val container = LocalAppContainer.current
+    val factory = remember(container) { AppViewModelFactory(container) }
     val backStackEntry by navController.currentBackStackEntryAsState()
     val currentDestination = backStackEntry?.destination
 
@@ -101,11 +106,11 @@ fun PocketSlothNavHost(
                 )
             }
             composable(Routes.DATASETS) {
-                val vm: DatasetViewModel = viewModel()
+                val vm: DatasetViewModel = viewModel(factory = factory)
                 DatasetScreen(viewModel = vm)
             }
             composable(Routes.CONFIG) {
-                val vm: TrainingConfigViewModel = viewModel()
+                val vm: TrainingConfigViewModel = viewModel(factory = factory)
                 TrainingConfigScreen(
                     viewModel = vm,
                     onTrainingStarted = {
@@ -116,11 +121,11 @@ fun PocketSlothNavHost(
                 )
             }
             composable(Routes.TRAINING) {
-                val vm: TrainingDashboardViewModel = viewModel()
+                val vm: TrainingDashboardViewModel = viewModel(factory = factory)
                 TrainingDashboardScreen(viewModel = vm)
             }
             composable(Routes.CHAT) {
-                val vm: ChatPlaygroundViewModel = viewModel()
+                val vm: ChatPlaygroundViewModel = viewModel(factory = factory)
                 ChatPlaygroundScreen(viewModel = vm)
             }
         }

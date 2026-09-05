@@ -1,14 +1,21 @@
 package com.pocketsloth.app.presentation.viewmodel
 
+import android.content.Context
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.pocketsloth.app.domain.model.TrainingRunStatus
+import com.pocketsloth.app.domain.repository.TrainingRunRepository
+import com.pocketsloth.app.native.NativeLoRAEngine
 import java.util.UUID
 import kotlin.random.Random
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 
@@ -26,25 +33,43 @@ data class ChatPlaygroundUiState(
     val layout: ChatCompareLayout = ChatCompareLayout.Segmented,
     val isGenerating: Boolean = false,
     val exportPath: String? = null,
+    val adapterPath: String? = null,
     val snackbar: String? = null,
 )
 
 /**
  * Chat playground with streaming tokens and Base vs Adapter A/B.
  *
- * TODO: inject NativeLoRAEngine (com.pocketsloth.app.native.NativeLoRAEngine)
- *       for real token streaming / adapter export.
+ * Inference is still stubbed (thin [ChatInferenceGateway]); adapter path is loaded
+ * from the latest completed [com.pocketsloth.app.domain.model.TrainingRun].
  */
-class ChatPlaygroundViewModel : ViewModel() {
+class ChatPlaygroundViewModel(
+    private val appContext: Context,
+    private val trainingRunRepository: TrainingRunRepository,
+    private val loraEngine: NativeLoRAEngine,
+) : ViewModel() {
 
-    // TODO: inject NativeLoRAEngine (com.pocketsloth.app.native.NativeLoRAEngine)
-    private val inference: ChatInferenceGateway? = null
-
+    private val inference: ChatInferenceGateway = StubChatInferenceGateway(
+        appContext = appContext,
+        trainingRunRepository = trainingRunRepository,
+        loraEngine = loraEngine,
+    )
 
     private val _uiState = MutableStateFlow(ChatPlaygroundUiState())
     val uiState: StateFlow<ChatPlaygroundUiState> = _uiState.asStateFlow()
 
     private var streamJob: Job? = null
+
+    init {
+        viewModelScope.launch {
+            refreshAdapterPath()
+        }
+    }
+
+    private suspend fun refreshAdapterPath() {
+        val path = inference.shareAdapterPath()
+        _uiState.update { it.copy(adapterPath = path, exportPath = path) }
+    }
 
     fun setInput(text: String) {
         _uiState.update { it.copy(input = text) }
@@ -99,15 +124,8 @@ class ChatPlaygroundViewModel : ViewModel() {
         streamJob = viewModelScope.launch {
             val useAdapter = mode == ChatModelMode.FineTunedAdapter
             try {
-                if (inference != null) {
-                    inference.streamCompletion(prompt, useAdapter).collect { token ->
-                        appendToken(assistantId, token, single = true)
-                    }
-                } else {
-                    simulateStream(prompt, useAdapter).forEach { token ->
-                        appendToken(assistantId, token, single = true)
-                        delay(28)
-                    }
+                inference.streamCompletion(prompt, useAdapter).collect { token ->
+                    appendToken(assistantId, token, single = true)
                 }
             } finally {
                 finalizeMessage(assistantId, single = true)
@@ -146,13 +164,14 @@ class ChatPlaygroundViewModel : ViewModel() {
         }
         streamJob = viewModelScope.launch {
             try {
-                val baseTokens = simulateStream(prompt, useAdapter = false)
-                val adapterTokens = simulateStream(prompt, useAdapter = true)
-                val max = maxOf(baseTokens.size, adapterTokens.size)
-                for (i in 0 until max) {
-                    if (i < baseTokens.size) appendToken(baseId, baseTokens[i], single = false, base = true)
-                    if (i < adapterTokens.size) appendToken(adapterId, adapterTokens[i], single = false, base = false)
-                    delay(28)
+                launch {
+                    inference.streamCompletion(prompt, useAdapter = false).collect { token ->
+                        appendToken(baseId, token, single = false, base = true)
+                    }
+                }.join()
+                // Stream adapter after base for simpler sequencing (both still stubbed)
+                inference.streamCompletion(prompt, useAdapter = true).collect { token ->
+                    appendToken(adapterId, token, single = false, base = false)
                 }
             } finally {
                 finalizeMessage(baseId, single = false, base = true)
@@ -204,31 +223,18 @@ class ChatPlaygroundViewModel : ViewModel() {
         }
     }
 
-    private suspend fun simulateStream(prompt: String, useAdapter: Boolean): List<String> {
-        // TODO: NativeLoRAEngine.generateStreaming(prompt, adapter=useAdapter)
-        val prefix = if (useAdapter) {
-            "Adapter: "
-        } else {
-            "Base: "
-        }
-        val body = if (useAdapter) {
-            "Fine-tuned reply for «${prompt.take(48)}» — concise and on-domain."
-        } else {
-            "Generic base-model reply regarding «${prompt.take(48)}»."
-        }
-        val full = prefix + body + if (Random.nextBoolean()) " ✓" else "."
-        return full.split(Regex("(?<=\\s)|(?=\\s)")).filter { it.isNotEmpty() }
-    }
-
     fun exportAdapter() {
         viewModelScope.launch {
-            val path = inference?.exportAdapter()
-                ?: "/data/data/com.pocketsloth.app/files/adapters/lora_adapter.safetensors"
-            // TODO: call NativeLoRAEngine.exportAdapter() / FineTuningService.export()
+            val path = inference.exportAdapter()
             _uiState.update {
                 it.copy(
                     exportPath = path,
-                    snackbar = "Adapter ready to share: $path",
+                    adapterPath = path,
+                    snackbar = if (path != null) {
+                        "Adapter ready to share: $path"
+                    } else {
+                        "No completed training run adapter found yet."
+                    },
                 )
             }
         }
@@ -253,5 +259,48 @@ class ChatPlaygroundViewModel : ViewModel() {
     override fun onCleared() {
         streamJob?.cancel()
         super.onCleared()
+    }
+}
+
+/**
+ * Stub inference gateway: simulated token stream until native generate lands.
+ * Adapter path is resolved from the latest completed TrainingRun.
+ */
+private class StubChatInferenceGateway(
+    private val appContext: Context,
+    private val trainingRunRepository: TrainingRunRepository,
+    private val loraEngine: NativeLoRAEngine,
+) : ChatInferenceGateway {
+
+    override fun streamCompletion(prompt: String, useAdapter: Boolean): Flow<String> = flow {
+        val prefix = if (useAdapter) "Adapter: " else "Base: "
+        val stubNote = if (loraEngine.isStubMode()) " [native stub]" else ""
+        val body = if (useAdapter) {
+            "Fine-tuned reply for «${prompt.take(48)}» — concise and on-domain.$stubNote"
+        } else {
+            "Generic base-model reply regarding «${prompt.take(48)}».$stubNote"
+        }
+        val full = prefix + body + if (Random.nextBoolean()) " ✓" else "."
+        full.split(Regex("(?<=\\s)|(?=\\s)")).filter { it.isNotEmpty() }.forEach { token ->
+            emit(token)
+            delay(28)
+        }
+    }
+
+    override suspend fun exportAdapter(): String? = resolveAdapterPath()
+
+    override suspend fun shareAdapterPath(): String? = resolveAdapterPath()
+
+    private suspend fun resolveAdapterPath(): String? {
+        val runs = trainingRunRepository.observeRuns().first()
+        val completed = runs.firstOrNull { it.status == TrainingRunStatus.COMPLETED }
+            ?: runs.firstOrNull { it.adapterOutputPath.isNotBlank() }
+        if (completed != null) return completed.adapterOutputPath
+        val dir = java.io.File(appContext.filesDir, "adapters")
+        if (!dir.isDirectory) return null
+        return dir.listFiles()
+            ?.filter { it.isFile && it.name.contains("lora") }
+            ?.maxByOrNull { it.lastModified() }
+            ?.absolutePath
     }
 }

@@ -81,4 +81,17 @@ class DatasetRepositoryImpl(
     override suspend fun deleteExample(exampleId: Long) {
         exampleDao.deleteById(exampleId)
     }
+
+    override suspend fun upsertExample(datasetId: Long, example: InstructionExample): Long {
+        require(datasetDao.getById(datasetId) != null) {
+            "Dataset $datasetId does not exist"
+        }
+        val entity = example.toEntity(datasetId = datasetId)
+        return if (entity.id == 0L) {
+            exampleDao.insert(entity)
+        } else {
+            exampleDao.update(entity)
+            entity.id
+        }
+    }
 }

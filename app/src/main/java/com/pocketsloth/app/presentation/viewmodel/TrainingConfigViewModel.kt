@@ -1,13 +1,28 @@
 package com.pocketsloth.app.presentation.viewmodel
 
+import android.content.Context
+import android.content.Intent
+import android.os.Build
+import androidx.core.content.ContextCompat
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.pocketsloth.app.domain.model.DatasetSourceFormat
+import com.pocketsloth.app.domain.model.PromptFormat
+import com.pocketsloth.app.domain.model.TrainingHyperparams
+import com.pocketsloth.app.domain.model.TrainingRun
+import com.pocketsloth.app.domain.model.TrainingRunStatus
+import com.pocketsloth.app.domain.repository.DatasetRepository
+import com.pocketsloth.app.domain.repository.HyperparamsRepository
+import com.pocketsloth.app.domain.repository.TrainingRunRepository
+import com.pocketsloth.app.service.FineTuningService
+import java.io.File
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 
@@ -23,20 +38,40 @@ sealed interface TrainingConfigEvent {
 
 /**
  * Training hyperparameter config VM.
- * TODO: inject FineTuningService (com.pocketsloth.app.service.FineTuningService)
- *       and NativeLoRAEngine (com.pocketsloth.app.native.NativeLoRAEngine)
+ * Persists via [HyperparamsRepository] and starts [FineTuningService] with a Room [TrainingRun].
  */
-class TrainingConfigViewModel : ViewModel() {
-
-    // TODO: inject FineTuningService / NativeLoRAEngine via FineTuningGateway
-    private val gateway: FineTuningGateway? = null
-
+class TrainingConfigViewModel(
+    private val appContext: Context,
+    private val hyperparamsRepository: HyperparamsRepository,
+    private val datasetRepository: DatasetRepository,
+    private val trainingRunRepository: TrainingRunRepository,
+) : ViewModel() {
 
     private val _uiState = MutableStateFlow(TrainingConfigUiState())
     val uiState: StateFlow<TrainingConfigUiState> = _uiState.asStateFlow()
 
     private val _events = MutableSharedFlow<TrainingConfigEvent>()
     val events: SharedFlow<TrainingConfigEvent> = _events.asSharedFlow()
+
+    init {
+        viewModelScope.launch {
+            hyperparamsRepository.observeHyperparams().collect { hp ->
+                _uiState.update { state ->
+                    state.copy(
+                        config = state.config.copy(
+                            loraRank = hp.loraR,
+                            loraAlpha = hp.loraAlpha,
+                            batchSize = hp.batchSize,
+                            gradAccumulation = hp.gradAccum,
+                            contextLength = hp.contextLength,
+                            learningRate = hp.learningRate,
+                            epochs = hp.epochs,
+                        ),
+                    )
+                }
+            }
+        }
+    }
 
     fun setModelPath(path: String) {
         _uiState.update { it.copy(config = it.config.copy(modelPath = path), validationError = null) }
@@ -51,7 +86,8 @@ class TrainingConfigViewModel : ViewModel() {
     }
 
     fun setBatchSize(size: Int) {
-        _uiState.update { it.copy(config = it.config.copy(batchSize = size)) }
+        val coerced = if (size == 2) 2 else 1
+        _uiState.update { it.copy(config = it.config.copy(batchSize = coerced)) }
     }
 
     fun setGradAccumulation(steps: Int) {
@@ -67,6 +103,7 @@ class TrainingConfigViewModel : ViewModel() {
     }
 
     fun setLearningRate(lr: Float) {
+        if (lr <= 0f) return
         _uiState.update { it.copy(config = it.config.copy(learningRate = lr)) }
     }
 
@@ -85,8 +122,46 @@ class TrainingConfigViewModel : ViewModel() {
         viewModelScope.launch {
             _uiState.update { it.copy(isStarting = true, validationError = null) }
             try {
-                // TODO: FineTuningService.start(cfg) / NativeLoRAEngine.configure(...)
-                gateway?.start(cfg)
+                val hyperparams = TrainingHyperparams(
+                    loraR = cfg.loraRank,
+                    loraAlpha = cfg.loraAlpha,
+                    batchSize = if (cfg.batchSize == 2) 2 else 1,
+                    gradAccum = cfg.gradAccumulation.coerceAtLeast(1),
+                    contextLength = cfg.contextLength.coerceIn(256, 512),
+                    learningRate = cfg.learningRate,
+                    epochs = cfg.epochs.coerceAtLeast(1),
+                )
+                hyperparamsRepository.saveHyperparams(hyperparams)
+
+                val datasetId = resolveDatasetId(cfg.datasetId)
+                val exampleCount = datasetRepository.getExampleCount(datasetId)
+                if (exampleCount <= 0) {
+                    _uiState.update {
+                        it.copy(validationError = "Add or import examples before training.")
+                    }
+                    return@launch
+                }
+
+                val adapterDir = File(appContext.filesDir, "adapters").apply { mkdirs() }
+                val adapterPath = File(
+                    adapterDir,
+                    "lora_${System.currentTimeMillis()}.safetensors",
+                ).absolutePath
+
+                val runId = trainingRunRepository.createRun(
+                    TrainingRun(
+                        datasetId = datasetId,
+                        status = TrainingRunStatus.PENDING,
+                        hyperparams = hyperparams,
+                        promptFormat = PromptFormat.CHAT_ML,
+                        modelPath = cfg.modelPath,
+                        adapterOutputPath = adapterPath,
+                    ),
+                )
+
+                val intent = FineTuningService.startIntent(appContext, runId)
+                startForegroundServiceCompat(intent)
+
                 _events.emit(TrainingConfigEvent.NavigateToDashboard)
             } catch (t: Throwable) {
                 _uiState.update {
@@ -95,6 +170,27 @@ class TrainingConfigViewModel : ViewModel() {
             } finally {
                 _uiState.update { it.copy(isStarting = false) }
             }
+        }
+    }
+
+    private suspend fun resolveDatasetId(configured: String?): Long {
+        configured?.toLongOrNull()?.let { id ->
+            if (datasetRepository.getDataset(id) != null) return id
+        }
+        val existing = datasetRepository.observeDatasets().first()
+        existing.firstOrNull()?.id?.let { return it }
+        return datasetRepository.createDataset(
+            name = "Default",
+            description = "Primary on-device fine-tuning dataset",
+            sourceFormat = DatasetSourceFormat.MANUAL,
+        )
+    }
+
+    private fun startForegroundServiceCompat(intent: Intent) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            ContextCompat.startForegroundService(appContext, intent)
+        } else {
+            appContext.startService(intent)
         }
     }
 }

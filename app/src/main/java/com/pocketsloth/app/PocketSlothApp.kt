@@ -2,29 +2,35 @@ package com.pocketsloth.app
 
 import android.app.Application
 import android.util.Log
+import com.pocketsloth.app.di.AppContainer
 import com.pocketsloth.app.native.NativeLoRAEngine
 
 /**
- * Application entry point. Loads the native training library once and keeps
- * a process-scoped [NativeLoRAEngine] handle for UI / ViewModel layers.
+ * Application entry point. Loads the native training library once and builds
+ * the process-scoped [AppContainer] (Room, DataStore, repositories, engine).
  */
 class PocketSlothApp : Application() {
 
-    lateinit var loraEngine: NativeLoRAEngine
+    lateinit var container: AppContainer
         private set
+
+    /** Convenience alias for [AppContainer.loraEngine]. */
+    val loraEngine: NativeLoRAEngine
+        get() = container.loraEngine
 
     override fun onCreate() {
         super.onCreate()
         instance = this
-        try {
+        val engine = try {
             NativeLoRAEngine.loadLibrary()
-            loraEngine = NativeLoRAEngine()
-            Log.i(TAG, "Native LoRA engine ready (stub mode=${loraEngine.isStubMode()})")
+            NativeLoRAEngine().also {
+                Log.i(TAG, "Native LoRA engine ready (stub mode=${it.isStubMode()})")
+            }
         } catch (t: Throwable) {
             Log.e(TAG, "Failed to initialize native LoRA engine", t)
-            // Still construct a Kotlin-side engine so callers can observe the error path.
-            loraEngine = NativeLoRAEngine(libraryLoaded = false)
+            NativeLoRAEngine(libraryLoaded = false)
         }
+        container = AppContainer(context = this, loraEngine = engine)
     }
 
     companion object {

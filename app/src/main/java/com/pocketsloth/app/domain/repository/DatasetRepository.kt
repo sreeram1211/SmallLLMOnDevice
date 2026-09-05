@@ -24,4 +24,6 @@ interface DatasetRepository {
     suspend fun addExamples(datasetId: Long, examples: List<InstructionExample>): Int
     suspend fun clearExamples(datasetId: Long)
     suspend fun deleteExample(exampleId: Long)
+    /** Insert when [example].id == 0, otherwise update in place. Returns row id. */
+    suspend fun upsertExample(datasetId: Long, example: InstructionExample): Long
 }

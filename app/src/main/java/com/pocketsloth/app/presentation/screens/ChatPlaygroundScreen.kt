@@ -58,8 +58,12 @@ import com.pocketsloth.app.ui.theme.UserBubbleColor
 
 @Composable
 fun ChatPlaygroundScreen(modifier: Modifier = Modifier) {
+    val container = com.pocketsloth.app.di.LocalAppContainer.current
+    val factory = androidx.compose.runtime.remember(container) {
+        com.pocketsloth.app.di.AppViewModelFactory(container)
+    }
     ChatPlaygroundScreen(
-        viewModel = androidx.lifecycle.viewmodel.compose.viewModel(),
+        viewModel = androidx.lifecycle.viewmodel.compose.viewModel(factory = factory),
         modifier = modifier,
     )
 }

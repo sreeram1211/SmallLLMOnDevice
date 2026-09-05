@@ -4,6 +4,7 @@ import androidx.room.Dao
 import androidx.room.Insert
 import androidx.room.OnConflictStrategy
 import androidx.room.Query
+import androidx.room.Update
 import com.pocketsloth.app.data.local.db.entity.ExampleEntity
 import kotlinx.coroutines.flow.Flow
 
@@ -20,6 +21,12 @@ interface ExampleDao {
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertAll(entities: List<ExampleEntity>): List<Long>
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insert(entity: ExampleEntity): Long
+
+    @Update
+    suspend fun update(entity: ExampleEntity)
 
     @Query("DELETE FROM examples WHERE dataset_id = :datasetId")
     suspend fun deleteByDataset(datasetId: Long)

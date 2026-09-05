@@ -45,8 +45,12 @@ import java.util.Locale
 
 @Composable
 fun TrainingDashboardScreen(modifier: Modifier = Modifier) {
+    val container = com.pocketsloth.app.di.LocalAppContainer.current
+    val factory = androidx.compose.runtime.remember(container) {
+        com.pocketsloth.app.di.AppViewModelFactory(container)
+    }
     TrainingDashboardScreen(
-        viewModel = androidx.lifecycle.viewmodel.compose.viewModel(),
+        viewModel = androidx.lifecycle.viewmodel.compose.viewModel(factory = factory),
         modifier = modifier,
     )
 }

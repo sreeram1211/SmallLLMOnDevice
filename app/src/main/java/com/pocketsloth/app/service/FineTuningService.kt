@@ -99,9 +99,15 @@ class FineTuningService : Service() {
 
     override fun onCreate() {
         super.onCreate()
-        val db = AppDatabase.getInstance(this)
-        datasetRepository = DatasetRepositoryImpl(db.datasetDao(), db.exampleDao())
-        runRepository = TrainingRunRepositoryImpl(db.trainingRunDao())
+        val app = applicationContext as? PocketSlothApp
+        if (app != null) {
+            datasetRepository = app.container.datasetRepository
+            runRepository = app.container.trainingRunRepository
+        } else {
+            val db = AppDatabase.getInstance(this)
+            datasetRepository = DatasetRepositoryImpl(db.datasetDao(), db.exampleDao())
+            runRepository = TrainingRunRepositoryImpl(db.trainingRunDao())
+        }
         thermalMonitor = ThermalMonitor(this)
         notificationManager = getSystemService(NOTIFICATION_SERVICE) as NotificationManager
         ensureNotificationChannel()
