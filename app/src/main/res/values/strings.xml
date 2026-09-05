@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">PocketSloth</string>
+    <string name="nav_datasets">Datasets</string>
+    <string name="nav_config">Config</string>
+    <string name="nav_training">Training</string>
+    <string name="nav_chat">Chat</string>
+</resources>
